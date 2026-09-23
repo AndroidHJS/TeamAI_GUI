@@ -13,3 +13,8 @@ vite.config.d.ts
 .e2e-user-data/
 test-results/
 playwright-report/
+!e2e/fixtures/teamai-bin/node_modules/
+!e2e/fixtures/teamai-bin/node_modules/teamai-cli/
+!e2e/fixtures/teamai-bin/node_modules/teamai-cli/package.json
+!e2e/fixtures/teamai-bin/node_modules/teamai-cli/dist/
+!e2e/fixtures/teamai-bin/node_modules/teamai-cli/dist/index.js

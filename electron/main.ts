@@ -1,8 +1,8 @@
-import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, safeStorage, shell } from "electron";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { delimiter, dirname, isAbsolute, join, relative, resolve } from "node:path";
-import { appendFileSync, existsSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { StringDecoder } from "node:string_decoder";
 import { fileURLToPath } from "node:url";
 import Store from "electron-store";
@@ -15,12 +15,18 @@ import type {
   LogEvent,
   StartTaskResponse,
   Stream,
+  SshCredentialState,
+  SshCredentialStateRequest,
   TaskError,
 } from "../src/types";
-import { ApiError, canonicalizeDirectory, validateAndBuildRequest } from "./validation";
+import { ApiError, canonicalizeDirectory, parseSshRepository, type SshTarget, validateAndBuildRequest } from "./validation";
+import { createAskpassBroker, type AskpassBroker } from "./askpass";
 
 interface SettingsSchema {
   recentWorkingDirectory: string;
+  sshCredentials: Record<string, string>;
+  sshBindings: Record<string, string>;
+  sshTargets: Record<string, SshTarget>;
 }
 
 interface ExecutableSpec {
@@ -34,6 +40,12 @@ interface ActiveTask {
   child: ChildProcessWithoutNullStreams;
   cancelled: boolean;
   cancelRequested: boolean;
+  askpass: AskpassBroker | null;
+  credentialTarget: SshTarget | null;
+  credentialPassword: string;
+  rememberCredential: boolean;
+  workingDirectory: string;
+  operation: string;
 }
 
 if (process.env.TEAMAI_E2E_USER_DATA) {
@@ -42,13 +54,84 @@ if (process.env.TEAMAI_E2E_USER_DATA) {
 
 const store = new Store<SettingsSchema>({
   name: "settings",
-  defaults: { recentWorkingDirectory: "" },
+  defaults: { recentWorkingDirectory: "", sshCredentials: {}, sshBindings: {}, sshTargets: {} },
 });
 let mainWindow: BrowserWindow | null = null;
 let activeTask: ActiveTask | null = null;
 let lastCancelledTaskId: string | null = null;
 let closing = false;
 const currentDirectory = dirname(fileURLToPath(import.meta.url));
+
+function getBoundTarget(workingDirectory: string): SshTarget | null {
+  const credentialId = store.get("sshBindings")[workingDirectory];
+  return credentialId ? store.get("sshTargets")[credentialId] ?? null : null;
+}
+
+function decryptCredential(credentialId: string): string | null {
+  const encrypted = store.get("sshCredentials")[credentialId];
+  if (!encrypted) return null;
+  try {
+    return safeStorage.decryptString(Buffer.from(encrypted, "base64"));
+  } catch {
+    const credentials = { ...store.get("sshCredentials") };
+    delete credentials[credentialId];
+    store.set("sshCredentials", credentials);
+    return null;
+  }
+}
+
+function saveCredential(target: SshTarget, workingDirectory: string, password?: string) {
+  const targets = { ...store.get("sshTargets"), [target.credentialId]: target };
+  const bindings = { ...store.get("sshBindings"), [workingDirectory]: target.credentialId };
+  store.set("sshTargets", targets);
+  store.set("sshBindings", bindings);
+  if (!password) return;
+  if (!safeStorage.isEncryptionAvailable()) throw new ApiError("credentialStorageUnavailable", "Windows 凭据加密当前不可用，密码未保存。");
+  const credentials = { ...store.get("sshCredentials"), [target.credentialId]: safeStorage.encryptString(password).toString("base64") };
+  store.set("sshCredentials", credentials);
+}
+
+function resolveAskpassHelper(): string {
+  const helper = app.isPackaged
+    ? join(process.resourcesPath, "askpass", "teamai-askpass.cmd")
+    : join(currentDirectory, "../../resources/askpass/teamai-askpass.cmd");
+  if (!existsSync(helper)) throw new ApiError("askpassUnavailable", "SSH 密码辅助程序缺失，请重新安装应用。");
+  return resolve(helper);
+}
+
+function quoteGitShell(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+async function prepareSshAuthentication(password: string): Promise<{ broker: AskpassBroker; env: NodeJS.ProcessEnv }> {
+  const ssh = findProgram("ssh");
+  if (!ssh) throw new ApiError("sshNotFound", "未在 PATH 中找到 SSH 客户端。");
+  const askpassHelper = resolveAskpassHelper();
+  const sshDirectory = join(app.getPath("userData"), "ssh");
+  mkdirSync(sshDirectory, { recursive: true });
+  const knownHosts = join(sshDirectory, "known_hosts");
+  const broker = await createAskpassBroker(password);
+  const command = [
+    quoteGitShell(ssh),
+    "-o StrictHostKeyChecking=accept-new",
+    `-o UserKnownHostsFile=${quoteGitShell(knownHosts)}`,
+    "-o PreferredAuthentications=keyboard-interactive,password",
+    "-o PubkeyAuthentication=no",
+  ].join(" ");
+  return {
+    broker,
+    env: {
+      ...process.env,
+      DISPLAY: "teamai-askpass",
+      GIT_ASKPASS: askpassHelper,
+      GIT_SSH_COMMAND: command,
+      GIT_TERMINAL_PROMPT: "0",
+      SSH_ASKPASS: askpassHelper,
+      SSH_ASKPASS_REQUIRE: "force",
+      TEAMAI_ASKPASS_PIPE: broker.pipeName,
+    },
+  };
+}
 
 function diagnosticLog(message: string) {
   const directory = process.env.TEAMAI_E2E_USER_DATA;
@@ -177,6 +260,7 @@ function classifyError(output: string): TaskError {
   const lower = output.toLowerCase();
   if (lower.includes("not initialized") || lower.includes("run teamai init") || lower.includes("尚未初始化")) return { kind: "notInitialized", message: "当前目录尚未初始化 TeamAI。" };
   if (["authentication failed", "permission denied", "not authenticated", "unauthorized"].some((value) => lower.includes(value))) return { kind: "authentication", message: "认证失败，请检查 Git 平台登录或凭据配置。" };
+  if (lower.includes("remote host identification has changed") || lower.includes("host key verification failed")) return { kind: "hostKeyChanged", message: "SSH 主机指纹已变化，为保护连接已拒绝访问。" };
   if (["could not resolve host", "network", "timed out", "connection refused"].some((value) => lower.includes(value))) return { kind: "network", message: "网络连接失败，请检查网络、代理和仓库地址。" };
   if (lower.includes("conflict")) return { kind: "conflict", message: "检测到 Git 冲突，请查看原始日志并手动处理。" };
   return { kind: "processFailed", message: "TeamAI 命令执行失败，请查看原始日志。" };
@@ -193,13 +277,15 @@ function streamLines(taskId: string, stream: Stream, source: NodeJS.ReadableStre
     const parts = pending.split(/\r?\n/);
     const tail = parts.pop() ?? "";
     pending = final ? "" : tail;
-    for (const line of parts) {
+    for (const rawLine of parts) {
+      const line = rawLine.replace(/teamai-askpass-[0-9a-f-]+/gi, "[askpass-channel]");
       onText(`${line}\n`);
       emit("teamai:log", { taskId, stream, line, timestamp: new Date().toISOString(), sequence: nextSequence() });
     }
     if (final && tail) {
-      onText(tail);
-      emit("teamai:log", { taskId, stream, line: tail, timestamp: new Date().toISOString(), sequence: nextSequence() });
+      const line = tail.replace(/teamai-askpass-[0-9a-f-]+/gi, "[askpass-channel]");
+      onText(line);
+      emit("teamai:log", { taskId, stream, line, timestamp: new Date().toISOString(), sequence: nextSequence() });
     }
   };
   source.on("data", (chunk: Buffer) => { pending += decoder.write(chunk); flush(false); });
@@ -225,19 +311,51 @@ async function killProcessTree(task: ActiveTask): Promise<void> {
 
 async function runTeamAi(rawRequest: unknown): Promise<StartTaskResponse> {
   if (activeTask) throw new ApiError("taskAlreadyRunning", "已有 TeamAI 任务正在运行。");
-  const { args, workingDirectory } = validateAndBuildRequest(rawRequest);
+  const { args, workingDirectory, operation, authentication, sshTarget } = validateAndBuildRequest(rawRequest);
   const node = resolveNode();
   const executable = resolveTeamAi(node);
+  const credentialTarget = sshTarget ?? getBoundTarget(workingDirectory);
+  if (authentication && !credentialTarget) throw new ApiError("credentialNotBound", "当前目录尚未关联 SSH 仓库，请先完成初始化。");
+  const suppliedPassword = authentication?.password ?? "";
+  const savedPassword = credentialTarget ? decryptCredential(credentialTarget.credentialId) ?? "" : "";
+  const credentialPassword = suppliedPassword || savedPassword;
+  let askpass: AskpassBroker | null = null;
+  let childEnvironment: NodeJS.ProcessEnv = { ...process.env };
+  if (credentialPassword) {
+    const prepared = await prepareSshAuthentication(credentialPassword);
+    askpass = prepared.broker;
+    childEnvironment = prepared.env;
+  } else if (authentication) {
+    throw new ApiError("credentialRequired", "请输入 SSH 密码，或删除密码认证后使用已配置的 SSH 密钥。");
+  }
   const taskId = randomUUID();
   const startedAt = Date.now();
-  const child = spawn(executable.program, [...executable.prefixArgs, ...args], {
-    cwd: workingDirectory,
-    shell: false,
-    windowsHide: true,
-    detached: process.platform !== "win32",
-    stdio: ["ignore", "pipe", "pipe"],
-  });
-  const task: ActiveTask = { id: taskId, child, cancelled: false, cancelRequested: false };
+  let child: ChildProcessWithoutNullStreams;
+  try {
+    child = spawn(executable.program, [...executable.prefixArgs, ...args], {
+      cwd: workingDirectory,
+      env: childEnvironment,
+      shell: false,
+      windowsHide: true,
+      detached: process.platform !== "win32",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+  } catch (error) {
+    await askpass?.dispose();
+    throw error;
+  }
+  const task: ActiveTask = {
+    id: taskId,
+    child,
+    cancelled: false,
+    cancelRequested: false,
+    askpass,
+    credentialTarget,
+    credentialPassword: suppliedPassword,
+    rememberCredential: authentication?.remember === true,
+    workingDirectory,
+    operation,
+  };
   activeTask = task;
   let spawned = false;
   let sequence = 0;
@@ -252,6 +370,27 @@ async function runTeamAi(rawRequest: unknown): Promise<StartTaskResponse> {
     if (!spawned) return;
     const status = task.cancelled ? "cancelled" : code === 0 ? "succeeded" : "failed";
     const error = status === "cancelled" ? { kind: "cancelled", message: "任务已取消。" } : status === "failed" ? classifyError(captured) : null;
+    if (status === "succeeded" && task.credentialTarget) {
+      try {
+        const passwordToSave = task.rememberCredential && task.credentialPassword ? task.credentialPassword : undefined;
+        if (task.credentialPassword && !task.rememberCredential) {
+          const credentials = { ...store.get("sshCredentials") };
+          delete credentials[task.credentialTarget.credentialId];
+          store.set("sshCredentials", credentials);
+        }
+        saveCredential(task.credentialTarget, task.workingDirectory, passwordToSave);
+      } catch (credentialError) {
+        emit("teamai:log", {
+          taskId,
+          stream: "stderr",
+          line: credentialError instanceof Error ? credentialError.message : "SSH 密码保存失败。",
+          timestamp: new Date().toISOString(),
+          sequence: nextSequence(),
+        });
+      }
+    }
+    task.credentialPassword = "";
+    void task.askpass?.dispose();
     emit("teamai:completed", { taskId, exitCode: code, durationMs: Date.now() - startedAt, status, error });
   });
 
@@ -259,6 +398,8 @@ async function runTeamAi(rawRequest: unknown): Promise<StartTaskResponse> {
     child.once("spawn", () => { spawned = true; resolvePromise(); });
     child.once("error", (error) => {
       if (activeTask?.id === taskId) activeTask = null;
+      task.credentialPassword = "";
+      void task.askpass?.dispose();
       reject(new ApiError("processStartFailed", `无法启动 TeamAI：${error.message}`));
     });
   });
@@ -277,11 +418,49 @@ async function cancelTeamAi(taskId: unknown): Promise<CancelAck> {
   return { accepted: true, alreadyRequested: false };
 }
 
+function resolveCredentialStateRequest(value: unknown): { workingDirectory: string; target: SshTarget | null } {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new ApiError("invalidRequest", "SSH 凭据请求必须是对象。");
+  const request = value as Record<string, unknown>;
+  const unknown = Object.keys(request).filter((key) => !["workingDirectory", "repository"].includes(key));
+  if (unknown.length) throw new ApiError("invalidRequest", `SSH 凭据请求包含未知字段：${unknown.join(", ")}`);
+  if (typeof request.workingDirectory !== "string") throw new ApiError("invalidDirectory", "工作目录必须是字符串。");
+  const workingDirectory = canonicalizeDirectory(request.workingDirectory);
+  if (request.repository !== undefined && typeof request.repository !== "string") throw new ApiError("invalidRepository", "仓库地址必须是字符串。");
+  const target = request.repository ? parseSshRepository(request.repository) : getBoundTarget(workingDirectory);
+  return { workingDirectory, target };
+}
+
+function getSshCredentialState(value: unknown): SshCredentialState {
+  const { target } = resolveCredentialStateRequest(value);
+  if (!target) return { configured: false, username: null, host: null, port: null };
+  return {
+    configured: Boolean(store.get("sshCredentials")[target.credentialId]),
+    username: target.username,
+    host: target.host,
+    port: target.port,
+  };
+}
+
+function deleteSshCredential(value: unknown): SshCredentialState {
+  const { target } = resolveCredentialStateRequest(value);
+  if (!target) return { configured: false, username: null, host: null, port: null };
+  const credentials = { ...store.get("sshCredentials") };
+  delete credentials[target.credentialId];
+  store.set("sshCredentials", credentials);
+  return { configured: false, username: target.username, host: target.host, port: target.port };
+}
+
 function registerIpc() {
   ipcMain.handle("teamai:check-environment", () => checkEnvironment().catch((error) => { throw errorForIpc(error); }));
   ipcMain.handle("teamai:run", (_event, request) => runTeamAi(request).catch((error) => { throw errorForIpc(error); }));
   ipcMain.handle("teamai:cancel", (_event, taskId) => cancelTeamAi(taskId).catch((error) => { throw errorForIpc(error); }));
   ipcMain.handle("teamai:get-recent-directory", () => store.get("recentWorkingDirectory") || null);
+  ipcMain.handle("teamai:get-ssh-credential-state", (_event, request: SshCredentialStateRequest) => {
+    try { return getSshCredentialState(request); } catch (error) { throw errorForIpc(error); }
+  });
+  ipcMain.handle("teamai:delete-ssh-credential", (_event, request: SshCredentialStateRequest) => {
+    try { return deleteSshCredential(request); } catch (error) { throw errorForIpc(error); }
+  });
   ipcMain.handle("teamai:select-directory", async () => {
     const result = await dialog.showOpenDialog(mainWindow!, { title: "选择 TeamAI 工作目录", properties: ["openDirectory", "createDirectory"] });
     if (result.canceled || !result.filePaths[0]) return null;

@@ -8,6 +8,9 @@ import {
   Clipboard,
   FolderOpen,
   GitBranch,
+  Eye,
+  EyeOff,
+  KeyRound,
   LoaderCircle,
   Play,
   RefreshCw,
@@ -19,7 +22,9 @@ import {
 import {
   cancelTeamAi,
   checkEnvironment,
+  deleteSshCredential,
   getRecentDirectory,
+  getSshCredentialState,
   onTeamAiCompleted,
   onTeamAiLog,
   runTeamAi,
@@ -36,6 +41,7 @@ import type {
   RunTeamAiRequest,
   Scope,
   TaskStatus,
+  SshCredentialState,
 } from "./types";
 import { AGENTS } from "./types";
 
@@ -114,6 +120,10 @@ export default function App() {
   const [workingDirectory, setWorkingDirectory] = useState("");
   const [projectState, setProjectState] = useState<ProjectState>("unchecked");
   const [repository, setRepository] = useState("");
+  const [sshPassword, setSshPassword] = useState("");
+  const [showSshPassword, setShowSshPassword] = useState(false);
+  const [rememberSshPassword, setRememberSshPassword] = useState(true);
+  const [sshCredential, setSshCredential] = useState<SshCredentialState | null>(null);
   const [scope, setScope] = useState<Scope>("project");
   const [role, setRole] = useState("");
   const [pushRole, setPushRole] = useState("");
@@ -132,6 +142,8 @@ export default function App() {
 
   const running = task?.status === "running";
   const ready = environment?.ready === true;
+  const sshRepository = /^(?:ssh:\/\/|[A-Za-z0-9._-]+@[A-Za-z0-9.-]+:)/.test(repository.trim());
+  const insecureRepository = /^http:\/\//i.test(repository.trim());
 
   const refreshEnvironment = useCallback(async () => {
     setEnvironmentLoading(true);
@@ -159,6 +171,19 @@ export default function App() {
       .catch(() => undefined);
   }, [refreshEnvironment]);
 
+  useEffect(() => {
+    if (!workingDirectory || (repository.trim() && !sshRepository)) {
+      setSshCredential(null);
+      return;
+    }
+    let disposed = false;
+    const request = { workingDirectory, repository: sshRepository ? repository.trim() : undefined };
+    void getSshCredentialState(request)
+      .then((state) => { if (!disposed) setSshCredential(state); })
+      .catch(() => { if (!disposed) setSshCredential(null); });
+    return () => { disposed = true; };
+  }, [repository, sshRepository, task?.id, task?.status, workingDirectory]);
+
   const applyCompletion = useCallback((event: CompletedEvent, operation: Operation) => {
     completedIdsRef.current.add(event.taskId);
     setTask({
@@ -167,6 +192,7 @@ export default function App() {
       status: event.status,
       message: event.error?.message,
     });
+    if (event.status === "succeeded" && operation !== "status") setSshPassword("");
 
     if (operation === "status") {
       if (event.status === "succeeded") setProjectState("initialized");
@@ -216,9 +242,16 @@ export default function App() {
       } else if (operation === "push") {
         base.pushOptions = { role: pushRole.trim() || undefined };
       }
+      if ((sshRepository || sshCredential?.username) && (sshPassword || sshCredential?.configured)) {
+        base.authentication = {
+          type: "sshPassword",
+          password: sshPassword || undefined,
+          remember: rememberSshPassword,
+        };
+      }
       return base;
     },
-    [agents, force, pushRole, repository, role, scope, workingDirectory],
+    [agents, force, pushRole, rememberSshPassword, repository, role, scope, sshCredential, sshPassword, sshRepository, workingDirectory],
   );
 
   const startOperation = useCallback(
@@ -230,6 +263,10 @@ export default function App() {
       }
       if (operation === "init" && !repository.trim()) {
         setTask({ id: null, operation, status: "failed", message: "请输入团队仓库地址。" });
+        return;
+      }
+      if (operation === "init" && insecureRepository) {
+        setTask({ id: null, operation, status: "failed", message: "普通 HTTP 不受支持，请使用 HTTPS 或 SSH 仓库地址。" });
         return;
       }
       if (
@@ -269,7 +306,7 @@ export default function App() {
         setTask({ id: null, operation, status: "failed", message });
       }
     },
-    [makeRequest, ready, repository, running, workingDirectory],
+    [insecureRepository, makeRequest, ready, repository, running, workingDirectory],
   );
 
   useEffect(() => {
@@ -279,10 +316,12 @@ export default function App() {
   }, [ready, running, startOperation, workingDirectory]);
 
   useEffect(() => {
-    if (!task?.id || task.status === "running" || task.operation === "status" || !ready || !workingDirectory) return;
+    if (!task?.id || task.status !== "succeeded" || task.operation === "status" || !ready || !workingDirectory) return;
     if (autoRefreshedTaskRef.current === task.id) return;
-    autoRefreshedTaskRef.current = task.id;
-    const timer = window.setTimeout(() => void startOperation("status", workingDirectory), 150);
+    const timer = window.setTimeout(() => {
+      autoRefreshedTaskRef.current = task.id!;
+      void startOperation("status", workingDirectory);
+    }, 150);
     return () => window.clearTimeout(timer);
   }, [ready, startOperation, task, workingDirectory]);
 
@@ -309,6 +348,17 @@ export default function App() {
     setAgents((current) =>
       current.includes(agent) ? current.filter((item) => item !== agent) : [...current, agent],
     );
+  };
+
+  const forgetSshPassword = async () => {
+    if (!workingDirectory) return;
+    try {
+      const state = await deleteSshCredential({ workingDirectory, repository: sshRepository ? repository.trim() : undefined });
+      setSshCredential(state);
+      setSshPassword("");
+    } catch (error) {
+      setTask({ id: null, operation: "init", status: "failed", message: `删除 SSH 密码失败：${String(error)}` });
+    }
   };
 
   const taskSummary = useMemo(() => {
@@ -387,6 +437,42 @@ export default function App() {
               <span>仓库地址</span>
               <input value={repository} onChange={(event) => setRepository(event.target.value)} disabled={running} placeholder="https://github.com/org/team-resources.git" />
             </label>
+            {insecureRepository && <p className="callout error">普通 HTTP 不受支持，请改用 HTTPS 或 SSH 地址。</p>}
+            {(sshRepository || sshCredential?.username) && (
+              <div className="ssh-credential-box">
+                <div className="credential-heading">
+                  <span><KeyRound size={15} /> SSH 密码认证</span>
+                  {sshCredential?.configured && <em>已安全保存</em>}
+                </div>
+                <p className="credential-target">
+                  {sshCredential?.username ?? repository.match(/^([^@]+)@/)?.[1] ?? "git"}@{sshCredential?.host ?? repository.match(/@([^:/]+)/)?.[1] ?? "SSH 主机"}:{sshCredential?.port ?? 22}
+                </p>
+                <label className="field">
+                  <span>{sshCredential?.configured ? "输入新密码以更新（可选）" : "SSH 登录密码"}</span>
+                  <div className="password-input">
+                    <input
+                      type={showSshPassword ? "text" : "password"}
+                      value={sshPassword}
+                      onChange={(event) => setSshPassword(event.target.value)}
+                      disabled={running}
+                      autoComplete="current-password"
+                      placeholder={sshCredential?.configured ? "已保存；留空则继续使用" : "请输入 SSH 密码"}
+                    />
+                    <button type="button" onClick={() => setShowSshPassword((value) => !value)} disabled={running} aria-label={showSshPassword ? "隐藏 SSH 密码" : "显示 SSH 密码"}>
+                      {showSshPassword ? <EyeOff size={16} /> : <Eye size={16} />}
+                    </button>
+                  </div>
+                </label>
+                <div className="credential-actions">
+                  <label className="check-row">
+                    <input type="checkbox" checked={rememberSshPassword} onChange={(event) => setRememberSshPassword(event.target.checked)} disabled={running} />
+                    <span>使用 Windows DPAPI 加密保存</span>
+                  </label>
+                  {sshCredential?.configured && <button type="button" className="link-button" onClick={() => void forgetSshPassword()} disabled={running}>删除已保存密码</button>}
+                </div>
+                <small className="credential-warning">首次连接会自动记录主机指纹；之后指纹变化时连接将被拒绝。</small>
+              </div>
+            )}
             <div className="field">
               <span>安装范围</span>
               <div className="segmented">
@@ -421,7 +507,7 @@ export default function App() {
                 </label>
               </div>
             )}
-            <button className="primary-button full" onClick={() => void startOperation("init")} disabled={!workingDirectory || !repository.trim() || !ready || running}>
+            <button className="primary-button full" onClick={() => void startOperation("init")} disabled={!workingDirectory || !repository.trim() || insecureRepository || !ready || running}>
               <Play size={15} fill="currentColor" /> {force ? "重新初始化" : "初始化 TeamAI"}
             </button>
           </article>

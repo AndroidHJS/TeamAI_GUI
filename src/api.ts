@@ -2,6 +2,8 @@ import type {
   CancelAck,
   EnvironmentReport,
   RunTeamAiRequest,
+  SshCredentialState,
+  SshCredentialStateRequest,
   StartTaskResponse,
 } from "./types";
 
@@ -16,6 +18,10 @@ export const cancelTeamAi = (taskId: string) =>
 
 export const selectDirectory = () => window.teamai.selectDirectory();
 export const getRecentDirectory = () => window.teamai.getRecentDirectory();
+export const getSshCredentialState = (request: SshCredentialStateRequest): Promise<SshCredentialState> =>
+  window.teamai.getSshCredentialState(request);
+export const deleteSshCredential = (request: SshCredentialStateRequest): Promise<SshCredentialState> =>
+  window.teamai.deleteSshCredential(request);
 export const onTeamAiLog = (callback: (event: import("./types").LogEvent) => void) =>
   window.teamai.onLog(callback);
 export const onTeamAiCompleted = (callback: (event: import("./types").CompletedEvent) => void) =>

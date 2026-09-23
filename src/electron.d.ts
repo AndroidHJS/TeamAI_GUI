@@ -4,6 +4,8 @@ import type {
   EnvironmentReport,
   LogEvent,
   RunTeamAiRequest,
+  SshCredentialState,
+  SshCredentialStateRequest,
   StartTaskResponse,
 } from "./types";
 
@@ -15,6 +17,8 @@ declare global {
       cancelTeamAi(taskId: string): Promise<CancelAck>;
       selectDirectory(): Promise<string | null>;
       getRecentDirectory(): Promise<string | null>;
+      getSshCredentialState(request: SshCredentialStateRequest): Promise<SshCredentialState>;
+      deleteSshCredential(request: SshCredentialStateRequest): Promise<SshCredentialState>;
       onLog(callback: (event: LogEvent) => void): () => void;
       onCompleted(callback: (event: CompletedEvent) => void): () => void;
     };

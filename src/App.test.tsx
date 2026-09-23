@@ -10,6 +10,8 @@ const api = vi.hoisted(() => ({
   cancelTeamAi: vi.fn(),
   selectDirectory: vi.fn(),
   getRecentDirectory: vi.fn(),
+  getSshCredentialState: vi.fn(),
+  deleteSshCredential: vi.fn(),
   onTeamAiLog: vi.fn(),
   onTeamAiCompleted: vi.fn(),
 }));
@@ -37,6 +39,8 @@ describe("App", () => {
     api.cancelTeamAi.mockResolvedValue({ accepted: true, alreadyRequested: false });
     api.selectDirectory.mockResolvedValue("C:\\测试 项目");
     api.getRecentDirectory.mockResolvedValue(null);
+    api.getSshCredentialState.mockResolvedValue({ configured: false, username: null, host: null, port: null });
+    api.deleteSshCredential.mockResolvedValue({ configured: false, username: "git", host: "192.168.5.254", port: 22 });
     api.onTeamAiLog.mockImplementation((callback: (event: unknown) => void) => {
       callbacks.set("teamai://log", ({ payload }) => callback(payload));
       return () => callbacks.delete("teamai://log");
@@ -91,5 +95,29 @@ describe("App", () => {
     fireEvent.click(screen.getByRole("button", { name: /推送变更/ }));
     expect(window.confirm).toHaveBeenCalled();
     expect(api.runTeamAi).not.toHaveBeenCalled();
+  });
+
+  it("shows SSH password controls and sends a password authentication request", async () => {
+    api.runTeamAi
+      .mockResolvedValueOnce({ taskId: "status-task" })
+      .mockResolvedValueOnce({ taskId: "init-task" });
+    render(<App />);
+    await screen.findByText("环境就绪");
+    await chooseDirectory();
+    await waitFor(() => expect(api.runTeamAi).toHaveBeenCalledTimes(1));
+    const statusCompletion: CompletedEvent = { taskId: "status-task", exitCode: 1, durationMs: 10, status: "failed", error: { kind: "notInitialized", message: "未初始化" } };
+    await act(async () => callbacks.get("teamai://completed")?.({ payload: statusCompletion }));
+
+    fireEvent.change(screen.getByPlaceholderText("https://github.com/org/team-resources.git"), {
+      target: { value: "git@192.168.5.254:androidai/teamai-config-repo.git" },
+    });
+    const password = await screen.findByPlaceholderText("请输入 SSH 密码");
+    expect(password).toHaveAttribute("type", "password");
+    fireEvent.change(password, { target: { value: "test-password" } });
+    fireEvent.click(screen.getByRole("button", { name: "初始化 TeamAI" }));
+    await waitFor(() => expect(api.runTeamAi).toHaveBeenCalledTimes(2));
+    expect(api.runTeamAi.mock.calls[1][0]).toMatchObject({
+      authentication: { type: "sshPassword", password: "test-password", remember: true },
+    });
   });
 });

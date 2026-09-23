@@ -5,11 +5,12 @@
 ## 功能
 
 - 检查 Node.js、Git、TeamAI CLI 的版本和可用性。
-- 选择并记住最近使用的工作目录，不保存 Token 或 Git 凭据。
+- 选择并记住最近使用的工作目录；SSH 密码可选用 Windows DPAPI 加密保存。
 - 支持 `teamai init`、`status`、`pull` 和经确认后的 `push --all`。
 - stdout/stderr 实时逐行显示，安全解析 ANSI SGR 颜色，不注入 HTML。
 - 同一时间只运行一个任务，支持取消；Windows 直接调用 `taskkill.exe /T` 终止完整子进程树。
 - Electron 主进程不通过 PowerShell、CMD 或 shell 字符串执行 TeamAI。
+- 支持 `git@host:path` 与 `ssh://user@host/path` 仓库；SSH 密码通过一次性 askpass 命名管道传递。
 
 ## 前置条件
 
@@ -35,10 +36,13 @@ npm run dev
 
 ```powershell
 npm test
+npm run test:e2e
 npm run build
 ```
 
 `npm run build` 会完成 TypeScript 检查，并分别构建 Electron 主进程、受限 preload 和 React renderer。
+
+端到端测试使用仓库内的假 TeamAI/SSH 场景，不会连接或修改真实团队仓库。
 
 建议在含中文与空格的临时 Git 仓库中进行人工验证：
 
@@ -60,7 +64,9 @@ NSIS 安装包输出到 `release/`。最终用户仍需安装 Node.js、Git 与 
 - Renderer 开启 `contextIsolation`、`sandbox`，关闭 `nodeIntegration`，只能使用 preload 暴露的固定方法。
 - 主进程仅允许 `init/status/pull/push` 四种操作，参数使用独立 argv 且 `shell: false`。
 - 仓库地址、角色、Agent、目录及与操作不匹配的选项均在主进程重新校验。
+- 普通 HTTP 仓库被拒绝；仅接受 HTTPS、SSH、`git@host:path` 或 `owner/repo`。
+- SSH 密码仅以 DPAPI 密文持久化，不放入命令参数、子进程环境变量、日志或临时文件；删除密码不会删除 TeamAI 项目配置。
+- 首次 SSH 连接使用应用专用 `known_hosts` 自动接受新主机，后续主机密钥变化会拒绝连接。
 - TeamAI 子进程 stdin 固定为空；不实现嵌入式终端或交互提示。
 - 成功仅由退出码 `0` 判定；错误关键字只用于友好提示，原始日志始终保留。
 - 外部导航默认拒绝；仅 HTTPS 新窗口请求交由系统浏览器处理。
-

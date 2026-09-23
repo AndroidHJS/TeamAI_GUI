@@ -63,7 +63,7 @@ button:disabled { opacity: 0.42; cursor: not-allowed; }
 
 .field { display: grid; gap: 7px; margin-bottom: 13px; }
 .field > span { color: #c1c8d0; font-size: 10px; font-weight: 600; }
-.field input[type="text"], .field input:not([type]) { width: 100%; height: 39px; padding: 0 11px; border: 1px solid var(--border); border-radius: 8px; background: #0a0d10; color: #e9edf2; font-size: 11px; }
+.field input[type="text"], .field input[type="password"], .field input:not([type]) { width: 100%; height: 39px; padding: 0 11px; border: 1px solid var(--border); border-radius: 8px; background: #0a0d10; color: #e9edf2; font-size: 11px; }
 .field input::placeholder { color: #535e69; }
 .field small { color: var(--muted); font-size: 9px; line-height: 1.4; }
 .segmented { display: grid; grid-template-columns: 1fr 1fr; padding: 3px; border: 1px solid var(--border); border-radius: 8px; background: #0b0e11; }
@@ -77,6 +77,17 @@ button:disabled { opacity: 0.42; cursor: not-allowed; }
 .agent-grid input { display: none; }
 .check-row { display: flex; align-items: center; gap: 7px; margin: 10px 0 14px; color: var(--warning); font-size: 10px; }
 .check-row input { accent-color: var(--warning); }
+.ssh-credential-box { margin: 0 0 14px; padding: 12px; border: 1px solid #31513f; border-radius: 9px; background: #0d1712; }
+.credential-heading, .credential-actions { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.credential-heading > span { display: flex; align-items: center; gap: 6px; color: var(--accent); font-size: 10px; font-weight: 700; }
+.credential-heading em { color: var(--accent); font-size: 9px; font-style: normal; }
+.credential-target { margin: 7px 0 11px; color: var(--muted); font-family: "DM Mono", monospace; font-size: 9px; }
+.password-input { position: relative; }
+.password-input input { padding-right: 40px !important; }
+.password-input button { position: absolute; top: 1px; right: 1px; width: 36px; height: 37px; display: grid; place-items: center; border: 0; border-left: 1px solid var(--border); border-radius: 0 7px 7px 0; background: #13191d; color: var(--muted); cursor: pointer; }
+.credential-actions .check-row { margin: 0; color: #c1c8d0; }
+.link-button { padding: 0; border: 0; background: transparent; color: var(--danger); font-size: 9px; cursor: pointer; }
+.credential-warning { display: block; margin-top: 10px; color: var(--warning); font-size: 8px; line-height: 1.5; }
 
 .primary-button, .secondary-button, .danger-button { height: 38px; display: inline-flex; align-items: center; justify-content: center; gap: 7px; border-radius: 8px; font-size: 10px; font-weight: 700; cursor: pointer; }
 .full { width: 100%; margin-top: 10px; }
