@@ -1,0 +1,15 @@
+node_modules/
+dist/
+out/
+release/
+src-tauri/target/
+*.log
+*.tsbuildinfo
+vite.config.js
+vite.config.d.ts
+.DS_Store
+.e2e-bin/
+.e2e-work/
+.e2e-user-data/
+test-results/
+playwright-report/
