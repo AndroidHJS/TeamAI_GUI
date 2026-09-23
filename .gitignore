@@ -13,3 +13,8 @@ vite.config.d.ts
 .e2e-user-data/
 test-results/
 playwright-report/
+.e2e-install/
+.e2e-keys/
+*.sock
+known_hosts
+.windows-helper/

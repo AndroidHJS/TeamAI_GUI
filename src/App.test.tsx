@@ -10,6 +10,8 @@ const api = vi.hoisted(() => ({
   cancelTeamAi: vi.fn(),
   selectDirectory: vi.fn(),
   getRecentDirectory: vi.fn(),
+  getSshCredentialState: vi.fn(),
+  deleteSshCredential: vi.fn(),
   onTeamAiLog: vi.fn(),
   onTeamAiCompleted: vi.fn(),
 }));
@@ -31,12 +33,15 @@ async function chooseDirectory() {
 
 describe("App", () => {
   beforeEach(() => {
+    vi.clearAllMocks();
     callbacks.clear();
     api.checkEnvironment.mockResolvedValue(environment);
     api.runTeamAi.mockResolvedValue({ taskId: "task-1" });
     api.cancelTeamAi.mockResolvedValue({ accepted: true, alreadyRequested: false });
     api.selectDirectory.mockResolvedValue("C:\\测试 项目");
     api.getRecentDirectory.mockResolvedValue(null);
+    api.getSshCredentialState.mockResolvedValue({ configured: false, username: "git", host: "example.com", port: 22 });
+    api.deleteSshCredential.mockResolvedValue({ deleted: true });
     api.onTeamAiLog.mockImplementation((callback: (event: unknown) => void) => {
       callbacks.set("teamai://log", ({ payload }) => callback(payload));
       return () => callbacks.delete("teamai://log");
@@ -91,5 +96,46 @@ describe("App", () => {
     fireEvent.click(screen.getByRole("button", { name: /推送变更/ }));
     expect(window.confirm).toHaveBeenCalled();
     expect(api.runTeamAi).not.toHaveBeenCalled();
+  });
+
+  it("shows SSH password controls and sends a strict authentication object", async () => {
+    api.runTeamAi.mockResolvedValueOnce({ taskId: "status-1" }).mockResolvedValueOnce({ taskId: "init-1" });
+    render(<App />);
+    await screen.findByText("环境就绪");
+    await chooseDirectory();
+    await act(async () => callbacks.get("teamai://completed")?.({ payload: {
+      taskId: "status-1", exitCode: 1, durationMs: 10, status: "failed", error: { kind: "notInitialized", message: "未初始化" },
+    } as CompletedEvent }));
+
+    fireEvent.change(screen.getByPlaceholderText("https://github.com/org/team-resources.git"), { target: { value: "git@example.com:acme/team.git" } });
+    expect(await screen.findByTestId("ssh-credential-card")).toBeInTheDocument();
+    await waitFor(() => expect(api.getSshCredentialState).toHaveBeenCalledWith("git@example.com:acme/team.git"));
+    const password = screen.getByLabelText("SSH 密码") as HTMLInputElement;
+    expect(password.type).toBe("password");
+    fireEvent.click(screen.getByRole("button", { name: "显示 SSH 密码" }));
+    expect(password.type).toBe("text");
+    fireEvent.change(password, { target: { value: "s p@ss!" } });
+    fireEvent.click(screen.getByRole("button", { name: "初始化 TeamAI" }));
+    await waitFor(() => expect(api.runTeamAi).toHaveBeenLastCalledWith(expect.objectContaining({
+      authentication: { type: "sshPassword", password: "s p@ss!", remember: true },
+    })));
+  });
+
+  it("does not replace a failed operation with an automatic status", async () => {
+    api.runTeamAi.mockResolvedValueOnce({ taskId: "status-1" }).mockResolvedValueOnce({ taskId: "init-1" });
+    render(<App />);
+    await screen.findByText("环境就绪");
+    await chooseDirectory();
+    await act(async () => callbacks.get("teamai://completed")?.({ payload: {
+      taskId: "status-1", exitCode: 1, durationMs: 10, status: "failed", error: { kind: "notInitialized", message: "未初始化" },
+    } as CompletedEvent }));
+    fireEvent.change(screen.getByPlaceholderText("https://github.com/org/team-resources.git"), { target: { value: "https://github.com/acme/team.git" } });
+    fireEvent.click(screen.getByRole("button", { name: "初始化 TeamAI" }));
+    await act(async () => callbacks.get("teamai://completed")?.({ payload: {
+      taskId: "init-1", exitCode: 1, durationMs: 10, status: "failed", error: { kind: "authentication", message: "认证失败" },
+    } as CompletedEvent }));
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    expect(api.runTeamAi).toHaveBeenCalledTimes(2);
+    expect(screen.getByText("认证失败")).toBeInTheDocument();
   });
 });

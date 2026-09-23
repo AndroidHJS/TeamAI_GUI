@@ -1,6 +1,6 @@
 {
   "name": "teamai-sync-gui",
-  "description": "Windows desktop GUI for Tencent TeamAI CLI synchronization",
+  "description": "Windows and macOS desktop GUI for Tencent TeamAI CLI synchronization",
   "author": "TeamAI Sync contributors",
   "private": true,
   "version": "0.1.0",
@@ -10,9 +10,14 @@
     "dev": "electron-vite dev",
     "build": "tsc -b && electron-vite build",
     "preview": "electron-vite preview",
-    "dist": "npm run build && electron-builder --win nsis",
+    "dist": "npm run dist:win",
+    "build:win-helper": "node scripts/build-windows-askpass.mjs",
+    "dist:win": "npm run build && npm run build:win-helper && electron-builder --win nsis --publish never",
+    "dist:mac": "npm run build && electron-builder --mac zip --publish never && node scripts/create-dmg.mjs",
+    "pack:test": "node scripts/pack-test.mjs",
+    "smoke:package": "node scripts/smoke-package.mjs",
     "test": "vitest run",
-    "test:e2e": "playwright test",
+    "test:e2e": "npm run build && npm run pack:test && playwright test",
     "test:watch": "vitest"
   },
   "dependencies": {
@@ -30,12 +35,15 @@
     "@types/react": "^19.0.2",
     "@types/react-dom": "^19.0.2",
     "@types/semver": "^7.7.1",
+    "@types/ssh2": "^1.15.6",
     "@vitejs/plugin-react": "^4.3.4",
     "electron": "^38.1.2",
     "electron-builder": "^26.0.12",
     "electron-vite": "^4.0.0",
     "jsdom": "^25.0.1",
     "playwright": "^1.55.0",
+    "postject": "^1.0.0-alpha.6",
+    "ssh2": "^1.17.0",
     "typescript": "~5.7.2",
     "vite": "^6.0.5",
     "vitest": "^2.1.8"
@@ -43,10 +51,33 @@
   "build": {
     "appId": "com.tencent.teamai.syncgui",
     "productName": "TeamAI Sync",
-    "directories": { "output": "release" },
-    "files": ["out/**/*", "package.json"],
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "out/**/*",
+      "package.json"
+    ],
     "asar": true,
-    "win": { "target": ["nsis"] },
+    "win": {
+      "target": [
+        "nsis"
+      ],
+      "extraResources": [
+        {
+          "from": ".windows-helper/teamai-askpass.exe",
+          "to": "teamai-askpass.exe"
+        }
+      ]
+    },
+    "mac": {
+      "target": [
+        "dmg",
+        "zip"
+      ],
+      "category": "public.app-category.developer-tools",
+      "identity": null
+    },
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,

@@ -6,6 +6,8 @@ import {
   ChevronUp,
   CircleStop,
   Clipboard,
+  Eye,
+  EyeOff,
   FolderOpen,
   GitBranch,
   LoaderCircle,
@@ -14,12 +16,15 @@ import {
   RotateCcw,
   TerminalSquare,
   Trash2,
+  KeyRound,
   X,
 } from "lucide-react";
 import {
   cancelTeamAi,
   checkEnvironment,
+  deleteSshCredential,
   getRecentDirectory,
+  getSshCredentialState,
   onTeamAiCompleted,
   onTeamAiLog,
   runTeamAi,
@@ -35,6 +40,7 @@ import type {
   Operation,
   RunTeamAiRequest,
   Scope,
+  SshCredentialState,
   TaskStatus,
 } from "./types";
 import { AGENTS } from "./types";
@@ -54,6 +60,17 @@ const operationLabels: Record<Operation, string> = {
   pull: "拉取资源",
   push: "推送变更",
 };
+
+function hasExplicitSshUsername(repository: string): boolean {
+  const value = repository.trim();
+  if (/^[A-Za-z0-9._-]+@[^:]+:.+/.test(value)) return true;
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === "ssh:" && Boolean(parsed.username);
+  } catch {
+    return false;
+  }
+}
 
 function DependencyRow({ dependency }: { dependency: DependencyStatus }) {
   const ok = dependency.available && dependency.compatible;
@@ -114,6 +131,12 @@ export default function App() {
   const [workingDirectory, setWorkingDirectory] = useState("");
   const [projectState, setProjectState] = useState<ProjectState>("unchecked");
   const [repository, setRepository] = useState("");
+  const [sshPassword, setSshPassword] = useState("");
+  const [showSshPassword, setShowSshPassword] = useState(false);
+  const [rememberSshPassword, setRememberSshPassword] = useState(true);
+  const [sshCredentialState, setSshCredentialState] = useState<SshCredentialState | null>(null);
+  const [sshCredentialLoading, setSshCredentialLoading] = useState(false);
+  const [sshCredentialMessage, setSshCredentialMessage] = useState("");
   const [scope, setScope] = useState<Scope>("project");
   const [role, setRole] = useState("");
   const [pushRole, setPushRole] = useState("");
@@ -132,6 +155,30 @@ export default function App() {
 
   const running = task?.status === "running";
   const ready = environment?.ready === true;
+  const sshPasswordVisible = hasExplicitSshUsername(repository);
+
+  const refreshSshCredentialState = useCallback(async (value: string) => {
+    if (!hasExplicitSshUsername(value)) {
+      setSshCredentialState(null);
+      setSshCredentialMessage("");
+      return;
+    }
+    setSshCredentialLoading(true);
+    setSshCredentialMessage("");
+    try {
+      setSshCredentialState(await getSshCredentialState(value.trim()));
+    } catch (error) {
+      setSshCredentialState(null);
+      setSshCredentialMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      setSshCredentialLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => void refreshSshCredentialState(repository), 250);
+    return () => window.clearTimeout(timer);
+  }, [refreshSshCredentialState, repository]);
 
   const refreshEnvironment = useCallback(async () => {
     setEnvironmentLoading(true);
@@ -175,7 +222,12 @@ export default function App() {
     } else if (operation === "init" && event.status === "succeeded") {
       setProjectState("initialized");
     }
-  }, []);
+    if (operation === "init") {
+      setSshPassword("");
+      setShowSshPassword(false);
+      if (hasExplicitSshUsername(repository)) void refreshSshCredentialState(repository);
+    }
+  }, [refreshSshCredentialState, repository]);
 
   useEffect(() => {
     let disposed = false;
@@ -213,12 +265,19 @@ export default function App() {
           agents: agents.length ? agents : undefined,
           force,
         };
+        if (sshPasswordVisible && (sshPassword || sshCredentialState?.configured)) {
+          base.authentication = {
+            type: "sshPassword",
+            password: sshPassword || undefined,
+            remember: rememberSshPassword,
+          };
+        }
       } else if (operation === "push") {
         base.pushOptions = { role: pushRole.trim() || undefined };
       }
       return base;
     },
-    [agents, force, pushRole, repository, role, scope, workingDirectory],
+    [agents, force, pushRole, rememberSshPassword, repository, role, scope, sshCredentialState?.configured, sshPassword, sshPasswordVisible, workingDirectory],
   );
 
   const startOperation = useCallback(
@@ -279,7 +338,7 @@ export default function App() {
   }, [ready, running, startOperation, workingDirectory]);
 
   useEffect(() => {
-    if (!task?.id || task.status === "running" || task.operation === "status" || !ready || !workingDirectory) return;
+    if (!task?.id || task.status !== "succeeded" || task.operation === "status" || !ready || !workingDirectory) return;
     if (autoRefreshedTaskRef.current === task.id) return;
     autoRefreshedTaskRef.current = task.id;
     const timer = window.setTimeout(() => void startOperation("status", workingDirectory), 150);
@@ -289,9 +348,11 @@ export default function App() {
   const chooseDirectory = async () => {
     const selected = await selectDirectory();
     if (typeof selected !== "string") return;
+    const unchanged = selected === workingDirectory;
     setWorkingDirectory(selected);
     autoCheckedDirectoryRef.current = "";
     setProjectState("unchecked");
+    if (unchanged) void startOperation("status", selected);
   };
 
   const cancel = async () => {
@@ -309,6 +370,19 @@ export default function App() {
     setAgents((current) =>
       current.includes(agent) ? current.filter((item) => item !== agent) : [...current, agent],
     );
+  };
+
+  const removeSshCredential = async () => {
+    if (!sshCredentialState?.configured || running) return;
+    if (!window.confirm(`删除 ${sshCredentialState.username}@${sshCredentialState.host}:${sshCredentialState.port} 的已保存密码？`)) return;
+    try {
+      await deleteSshCredential(repository.trim());
+      setSshPassword("");
+      setSshCredentialMessage("已删除保存的 SSH 密码。");
+      await refreshSshCredentialState(repository);
+    } catch (error) {
+      setSshCredentialMessage(error instanceof Error ? error.message : String(error));
+    }
   };
 
   const taskSummary = useMemo(() => {
@@ -387,6 +461,43 @@ export default function App() {
               <span>仓库地址</span>
               <input value={repository} onChange={(event) => setRepository(event.target.value)} disabled={running} placeholder="https://github.com/org/team-resources.git" />
             </label>
+            {sshPasswordVisible && (
+              <div className="ssh-credential-card" data-testid="ssh-credential-card">
+                <div className="ssh-credential-heading">
+                  <span><KeyRound size={15} /> SSH 密码认证</span>
+                  {sshCredentialLoading ? <small>检查中…</small> : sshCredentialState?.configured ? <small className="credential-saved">已保存</small> : <small>未保存</small>}
+                </div>
+                {sshCredentialState && (
+                  <p className="ssh-endpoint">{sshCredentialState.username}@{sshCredentialState.host}:{sshCredentialState.port}</p>
+                )}
+                <label className="field">
+                  <span>{sshCredentialState?.configured ? "新密码（留空使用已保存密码）" : "SSH 密码（可选，留空使用密钥认证）"}</span>
+                  <span className="password-input">
+                    <input
+                      type={showSshPassword ? "text" : "password"}
+                      value={sshPassword}
+                      onChange={(event) => setSshPassword(event.target.value)}
+                      disabled={running}
+                      maxLength={1024}
+                      autoComplete="new-password"
+                      aria-label="SSH 密码"
+                    />
+                    <button type="button" onClick={() => setShowSshPassword((value) => !value)} disabled={running} aria-label={showSshPassword ? "隐藏 SSH 密码" : "显示 SSH 密码"}>
+                      {showSshPassword ? <EyeOff size={15} /> : <Eye size={15} />}
+                    </button>
+                  </span>
+                </label>
+                <div className="ssh-credential-actions">
+                  <label className="check-row">
+                    <input type="checkbox" checked={rememberSshPassword} onChange={(event) => setRememberSshPassword(event.target.checked)} disabled={running} />
+                    <span>使用系统安全存储记住密码</span>
+                  </label>
+                  {sshCredentialState?.configured && <button type="button" className="link-danger" onClick={() => void removeSshCredential()} disabled={running}>删除密码</button>}
+                </div>
+                {sshPassword && sshCredentialState?.configured && <small className="credential-update-hint">初始化成功后才会更新已保存密码。</small>}
+                {sshCredentialMessage && <p className="credential-message">{sshCredentialMessage}</p>}
+              </div>
+            )}
             <div className="field">
               <span>安装范围</span>
               <div className="segmented">

@@ -44,11 +44,29 @@ export interface PushOptions {
   role?: string;
 }
 
+export interface SshPasswordAuthentication {
+  type: "sshPassword";
+  password?: string;
+  remember: boolean;
+}
+
+export interface SshCredentialState {
+  configured: boolean;
+  username: string;
+  host: string;
+  port: number;
+}
+
+export interface DeleteSshCredentialResult {
+  deleted: boolean;
+}
+
 export interface RunTeamAiRequest {
   operation: Operation;
   workingDirectory: string;
   initOptions?: InitOptions;
   pushOptions?: PushOptions;
+  authentication?: SshPasswordAuthentication;
 }
 
 export interface StartTaskResponse {
@@ -80,4 +98,3 @@ export interface CompletedEvent {
   status: Exclude<TaskStatus, "running">;
   error?: TaskError | null;
 }
-

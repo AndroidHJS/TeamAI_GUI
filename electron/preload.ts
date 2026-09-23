@@ -7,6 +7,8 @@ const api = {
   cancelTeamAi: (taskId: string) => ipcRenderer.invoke("teamai:cancel", taskId),
   selectDirectory: () => ipcRenderer.invoke("teamai:select-directory"),
   getRecentDirectory: () => ipcRenderer.invoke("teamai:get-recent-directory"),
+  getSshCredentialState: (repository: string) => ipcRenderer.invoke("teamai:get-ssh-credential-state", repository),
+  deleteSshCredential: (repository: string) => ipcRenderer.invoke("teamai:delete-ssh-credential", repository),
   onLog: (callback: (event: LogEvent) => void) => {
     const listener = (_event: Electron.IpcRendererEvent, payload: LogEvent) => callback(payload);
     ipcRenderer.on("teamai:log", listener);
@@ -20,4 +22,3 @@ const api = {
 };
 
 contextBridge.exposeInMainWorld("teamai", Object.freeze(api));
-
